@@ -5,12 +5,14 @@ import numpy as np
 
 import Util
 from GameState import GameState
-from VideoFeed import VideoFeed
+from VideoFeed import VideoFeed, loadImageWithOpacity, rotate_image
 
 STATE_INIT = 0
 STATE_SETUP = 1
 STATE_ONGOING = 2
 STATE_GAMEOVER = 3
+
+GOAL_SCORE_DURATION = 30
 
 CONFIG = {
     "HUE_RANGE": 10,
@@ -27,15 +29,21 @@ class Game:
         self.capture_source = filename if not (filename is None) else 0
         self.video_feed = None
 
+        self.goal_img = loadImageWithOpacity("public/target.png")
+
         self.paused = False
         self.should_quit = False
         self.show_mask = False
+        self.show_dev_overlay = True
 
         self.ball = None
         self.ball_size = None
         self.ball_contour = None
 
         self.isMidClick = False
+
+        self.goal_is_scored = False
+        self.goal_timer = 0
         self.goal = None
         self.goal_size = [50, 50]
 
@@ -54,7 +62,16 @@ class Game:
             frame = self.video_feed.getFrame(self.paused).copy()
             if self.gs.isOngoing():
                 self.updatePositions(frame)
-            self.render(self.renderFrame(frame), self.renderOverlay(frame))
+                if self.goal_is_scored:
+                    if self.goal_timer == 0:
+                        self.goal_is_scored = False
+                        self.goal_timer = -1
+                        self.gs.points += 1
+                        self.randomizeGoal()
+                    else:
+                        self.goal_timer -= 1
+
+            self.render(self.renderFrame(frame), self.renderDevOverlay(frame), self.renderGameOverlay(frame))
 
     def handleInputEvent(self):
         input_key = cv2.waitKey(1)
@@ -78,6 +95,8 @@ class Game:
             self.should_quit = True
         elif key == 109:  # m
             self.show_mask = not self.show_mask
+        elif key == 110:  # n
+            self.show_dev_overlay = not self.show_dev_overlay
         if self.gs.isSetupBall() or self.gs.isSetupField() or self.gs.isAwaitingSetup():
             if key == 122:  # z
                 self.gs.setStateSetupField()
@@ -86,6 +105,7 @@ class Game:
             elif key == 99:  # c
                 if self.gs.isReady():
                     self.gs.setStateOngoing()
+                    self.randomizeGoal()
                 else:
                     self.gs.setStateAwaitingSetup()
         elif self.gs.isOngoing():
@@ -120,15 +140,27 @@ class Game:
 
         cnt = self.video_feed.getContour(self.gs.ball_color_hsv_range, contour_area=self.gs.ball_contour_size)
         x, y, width, height = cv2.boundingRect(cnt)
-        if self.goal is not None and Util.boxesIntersect(x, y,
-                                                         width, height,
-                                                         self.goal[0], self.goal[1],
-                                                         self.goal_size[0], self.goal_size[1]):
-            self.gs.points += 1
-            self.randomizeGoal()
+        if self.goal is not None and self.goal_is_scored == False \
+                and Util.boxesIntersect(x, y,
+                                        width, height,
+                                        self.goal[0], self.goal[1],
+                                        self.goal_size[0], self.goal_size[1]):
+            # self.gs.points += 1
+            self.goal_is_scored = True
+            self.goal_timer = GOAL_SCORE_DURATION
+            # self.randomizeGoal()
 
-    def render(self, frame, overlay):
-        out = cv2.bitwise_or(frame, overlay)
+    def render(self, frame, dev_overlay, game_overlay):
+        out = frame
+
+        _, mask = cv2.threshold(cv2.cvtColor(game_overlay, cv2.COLOR_BGR2GRAY), int(10), 255, cv2.THRESH_BINARY)
+
+        out = cv2.bitwise_or(out, out, mask=cv2.bitwise_not(mask))
+        out = cv2.bitwise_or(out, game_overlay)
+
+        if self.show_dev_overlay:
+            out = cv2.bitwise_or(out, dev_overlay)
+
         cv2.imshow(self.window_name, out)
 
     def renderFrame(self, frame):
@@ -139,21 +171,37 @@ class Game:
         else:
             return frame
 
-    def renderOverlay(self, frame):
+    def renderGameOverlay(self, frame):
+        height, width = frame.shape[:2]
+        frame_overlay = cv2.resize(np.zeros((height, width, 3), np.uint8), (width, height))
+
+        if self.goal is not None:
+            x1, y1 = self.goal[0], self.goal[1]
+            x2, y2 = x1 + self.goal_size[0], y1 + self.goal_size[1]
+
+            out = cv2.resize(self.goal_img, (self.goal_size[0], self.goal_size[1]))
+            out = rotate_image(out, self.goal_timer*15)
+            if self.goal_is_scored:
+                out = out * (self.goal_timer/GOAL_SCORE_DURATION)
+            frame_overlay[y1:y2, x1:x2] = out
+
+        return frame_overlay
+
+    def renderDevOverlay(self, frame):
         # Create a blank image of the same size as the frame
         height, width = frame.shape[:2]
         frame_overlay = cv2.resize(np.zeros((height, width, 3), np.uint8), (width, height))
 
         # draw field rect
         if self.gs.isFieldReady():
-            cv2.rectangle(frame_overlay, self.gs.field_top_left, self.gs.field_bottom_right, (150, 255, 10), 5)
+            cv2.rectangle(frame_overlay, self.gs.field_top_left, self.gs.field_bottom_right, (150, 255, 10), 1)
 
         # draw ball
         if self.gs.isBallReady():
             cnt = self.video_feed.getContour(self.gs.ball_color_hsv_range, contour_area=self.gs.ball_contour_size)
             cv2.drawContours(frame_overlay, [cnt], -1, (0, 255, 0), 3)
             x, y, width, height = cv2.boundingRect(cnt)
-            cv2.rectangle(frame_overlay, (x, y), (x + width, y + height), (0, 0, 255), 2)
+            # cv2.rectangle(frame_overlay, (x, y), (x + width, y + height), (0, 0, 255), 2)
 
         color = (128, 255, 120)  # if self.track_color_bgr is None else self.track_color_bgr.tolist()
         overlay_strings = self.overlayText()
@@ -165,7 +213,7 @@ class Game:
             x1, y1 = self.goal[0], self.goal[1]
             x2, y2 = x1 + self.goal_size[0], y1 + self.goal_size[1]
 
-            cv2.rectangle(frame_overlay, (x1, y1), (x2, y2), (150, 255, 10), 10)
+            cv2.rectangle(frame_overlay, (x1, y1), (x2, y2), (150, 255, 10), 1)
 
         return frame_overlay
 

@@ -1,6 +1,7 @@
 import math
 
 import cv2
+import numpy as np
 
 
 class VideoFeed:
@@ -82,3 +83,21 @@ class VideoFeed:
             for cnt in contours:
                 return cnt
         return best_cnt
+
+
+def loadImageWithOpacity(filename):
+    goal_bgra = cv2.imread(filename, cv2.IMREAD_UNCHANGED)
+    alpha_channel = goal_bgra[:, :, 3]
+    goal_bgr = goal_bgra[:, :, :3]
+
+    alpha_factor = alpha_channel[:, :, np.newaxis].astype(np.float32) / 255.0
+    alpha_factor = np.concatenate((alpha_factor, alpha_factor, alpha_factor), axis=2)
+
+    return goal_bgr.astype(np.float32) * alpha_factor
+
+
+def rotate_image(image, angle):
+    image_center = tuple(np.array(image.shape[1::-1]) / 2)
+    rot_mat = cv2.getRotationMatrix2D(image_center, angle, 1.0)
+    result = cv2.warpAffine(image, rot_mat, image.shape[1::-1], flags=cv2.INTER_LINEAR)
+    return result
